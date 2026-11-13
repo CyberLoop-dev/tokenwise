@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tokenwise: estimate tokens and cost</title>
+<style>
+:root{--bg:#f6f7fb;--card:#fff;--fg:#0f172a;--mut:#64748b;--line:#e2e8f0;--acc:#6366f1;--ok:#16a34a;--bad:#dc2626}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1020;--card:#131a31;--fg:#e8ecf8;--mut:#94a3b8;--line:#25304f;--acc:#818cf8;--ok:#4ade80;--bad:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 ui-sans-serif,system-ui,"Segoe UI",Helvetica,Arial,sans-serif}
+main{max-width:920px;margin:0 auto;padding:32px 18px 60px}
+h1{margin:0 0 4px;font-size:30px;letter-spacing:-.5px}
+.sub{color:var(--mut);margin:0 0 22px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px}
+textarea{width:100%;min-height:190px;resize:vertical;background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:12px;padding:12px;font:15px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+textarea:focus,input:focus{outline:2px solid var(--acc);outline-offset:1px}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+.stat{flex:1 1 120px;border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.stat b{display:block;font-size:24px;color:var(--acc)}
+.stat span{color:var(--mut);font-size:13px}
+label{font-size:13px;color:var(--mut)}
+input[type=number],input[type=text]{width:100%;background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:inherit}
+.row{display:flex;gap:14px;flex-wrap:wrap;align-items:end;margin-bottom:12px}
+.row>div{flex:1 1 160px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);font-size:14px}
+th{color:var(--mut);font-weight:600}
+td.num{font-variant-numeric:tabular-nums}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+.note{color:var(--mut);font-size:13px;margin-top:10px}
+.scroll{overflow-x:auto}
+</style>
+</head>
+<body>
+<main>
+  <h1>🪙 tokenwise</h1>
+  <p class="sub">Paste a prompt, see how many tokens it likely costs and what it will run you. Everything stays in your browser.</p>
+
+  <div class="card">
+    <textarea id="text" placeholder="Paste your prompt here..." spellcheck="false"></textarea>
+    <div class="stats">
+      <div class="stat"><b id="sTok">0</b><span>estimated tokens</span></div>
+      <div class="stat"><b id="sChar">0</b><span>characters</span></div>
+      <div class="stat"><b id="sWord">0</b><span>words</span></div>
+      <div class="stat"><b id="sLine">0</b><span>lines</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div><label for="out">Expected output tokens</label><input id="out" type="number" min="0" value="500"></div>
+      <div><label for="calls">Number of calls</label><input id="calls" type="number" min="1" value="1"></div>
+    </div>
+    <div class="scroll">
+    <table>
+      <thead><tr><th>Tier (editable)</th><th>$ / 1M input</th><th>$ / 1M output</th><th>Context window</th><th>Cost</th><th>Fits?</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    </div>
+    <p class="note">Token counts are an estimate (about 4 characters per token for Latin text, fewer for other scripts). Real tokenizers differ per model. The price tiers are examples: edit them to match your provider's current pricing. Your edits are saved in this browser.</p>
+  </div>
+</main>
+<script>
+const KEY = "tokenwise.tiers.v1";
+const DEFAULT_TIERS = [
+  {name: "Small model",  inp: 0.25, out: 1.25, ctx: 200000},
+  {name: "Medium model", inp: 3,    out: 15,   ctx: 200000},
+  {name: "Large model",  inp: 15,   out: 75,   ctx: 200000}
+];
+let tiers = load();
+function load(){
+  try { const v = JSON.parse(localStorage.getItem(KEY)); if (Array.isArray(v) && v.length) return v; } catch (e) {}
+  return JSON.parse(JSON.stringify(DEFAULT_TIERS));
+}
+function save(){ try { localStorage.setItem(KEY, JSON.stringify(tiers)); } catch (e) {} }
+
+const $ = id => document.getElementById(id);
+function estimate(t){
+  let ascii = 0, other = 0;
+  for (const ch of t) { ch.codePointAt(0) < 128 ? ascii++ : other++; }
+  return Math.ceil(ascii / 4 + other / 1.5);
+}
+const fmt = n => n.toLocaleString("en-US");
+const money = n => n < 0.01 && n > 0 ? "<$0.01" : "$" + n.toFixed(n < 1 ? 4 : 2);
+
+function buildRows(){
+  const body = $("rows"); body.textContent = "";
+  tiers.forEach((t, i) => {
+    const tr = document.createElement("tr");
+    const mk = (key, type, step) => {
+      const td = document.createElement("td");
+      const inp = document.createElement("input");
+      inp.type = type; inp.value = t[key]; if (step) inp.step = step; if (type === "number") inp.min = 0;
+      inp.addEventListener("input", () => { t[key] = type === "number" ? Number(inp.value) || 0 : inp.value; save(); update(); });
+      td.appendChild(inp); return td;
+    };
+    tr.appendChild(mk("name", "text"));
+    tr.appendChild(mk("inp", "number", "any"));
+    tr.appendChild(mk("out", "number", "any"));
+    tr.appendChild(mk("ctx", "number", "1000"));
+    const cost = document.createElement("td"); cost.className = "num"; cost.dataset.i = i; cost.dataset.k = "cost";
+    const fit = document.createElement("td"); fit.dataset.i = i; fit.dataset.k = "fit";
+    tr.appendChild(cost); tr.appendChild(fit);
+    body.appendChild(tr);
+  });
+}
+
+function update(){
+  const text = $("text").value;
+  const tok = estimate(text);
+  $("sTok").textContent = fmt(tok);
+  $("sChar").textContent = fmt([...text].length);
+  $("sWord").textContent = fmt((text.trim().match(/\S+/g) || []).length);
+  $("sLine").textContent = fmt(text ? text.split("\n").length : 0);
+  const out = Math.max(0, Number($("out").value) || 0);
+  const calls = Math.max(1, Number($("calls").value) || 1);
+  tiers.forEach((t, i) => {
+    const c = calls * (tok * t.inp + out * t.out) / 1e6;
+    document.querySelector(`[data-i="${i}"][data-k="cost"]`).textContent = money(c);
+    const total = tok + out, f = document.querySelector(`[data-i="${i}"][data-k="fit"]`);
+    const ok = !t.ctx || total <= t.ctx;
+    f.textContent = ok ? "✓ fits" : "✗ too long";
+    f.className = ok ? "ok" : "bad";
+  });
+}
+buildRows();
+["text", "out", "calls"].forEach(id => $(id).addEventListener("input", update));
+update();
+</script>
+</body>
+</html>
